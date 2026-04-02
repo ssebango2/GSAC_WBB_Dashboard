@@ -27,6 +27,8 @@ def load_data():
     df["home_team_id"] = pd.to_numeric(df["home_team_id"], errors="coerce")
     df["away_team_id"] = pd.to_numeric(df["away_team_id"], errors="coerce")
     df["score_value"] = pd.to_numeric(df["score_value"], errors="coerce").fillna(0)
+    # Normalise the scoring_play flag to a proper boolean
+    df["scoring_play"] = df["scoring_play"].astype(str).str.upper() == "TRUE"
     return df
 
 
@@ -39,27 +41,45 @@ def get_opponent(row):
 def count_possessions(game_df, team_id):
     """
     Estimate possessions for one team in one game using the standard
-    play-by-play heuristic: possession ends on a made FG, turnover,
-    defensive rebound (by the other team), or the last free throw attempt.
+    play-by-play heuristic. A possession ends on:
+      1. A made field goal
+      2. A turnover
+      3. An opponent defensive rebound (missed shot/FT the defense secures)
+      4. The last made free throw of a trip (ball goes to defense; no rebound event)
+    Offensive rebounds do NOT end a possession — only opponent defensive
+    rebounds do, so second-chance points stay within the same possession.
     """
-    team_plays = game_df[game_df["team_id"] == team_id].copy()
+    game_sorted = game_df.sort_values("sequence_number").reset_index(drop=True)
+    team_plays = game_sorted[game_sorted["team_id"] == team_id]
     possessions = 0
 
-    made_fg = team_plays["type_text"].isin(MADE_FG_TYPES)
+    # 1 & 2: made field goals (scoring_play=True filters out misses) and turnovers
+    made_fg   = team_plays["type_text"].isin(MADE_FG_TYPES) & (team_plays["scoring_play"] == True)
     turnovers = team_plays["type_text"].isin(TURNOVER_TYPES)
+    possessions += made_fg.sum() + turnovers.sum()
 
-    # Defensive rebounds credited to the opponent end our possession
-    opp_id = game_df.loc[
-        game_df["team_id"] != team_id, "team_id"
+    # 3: opponent defensive rebounds end our possession
+    opp_id = game_sorted.loc[
+        game_sorted["team_id"] != team_id, "team_id"
     ].dropna().unique()
     if len(opp_id) > 0:
-        opp_def_reb = game_df[
-            (game_df["team_id"] == opp_id[0]) &
-            (game_df["type_text"] == DEF_REBOUND_TYPE)
+        opp_def_reb = game_sorted[
+            (game_sorted["team_id"] == opp_id[0]) &
+            (game_sorted["type_text"] == DEF_REBOUND_TYPE)
         ]
         possessions += len(opp_def_reb)
 
-    possessions += made_fg.sum() + turnovers.sum()
+    # 4: last made FT of a trip — the next row in the game is NOT a free throw
+    team_made_ft = team_plays[
+        (team_plays["type_text"] == FREE_THROW_TYPE) &
+        (team_plays["scoring_play"] == True)
+    ]
+    for idx in team_made_ft.index:
+        next_idx = idx + 1
+        if next_idx not in game_sorted.index or \
+                game_sorted.loc[next_idx, "type_text"] != FREE_THROW_TYPE:
+            possessions += 1
+
     return max(possessions, 1)  # avoid division by zero
 
 
@@ -72,9 +92,10 @@ def compute_ppp(df):
         opponent = get_opponent(row0)
         home_away = "Home" if row0["home_team_id"] == UCSB_TEAM_ID else "Away"
 
-        # UCSB points = sum of score_value on UCSB plays
+        # UCSB points = sum of score_value on UCSB *scoring* plays only
         ucsb_points = game_df.loc[
-            game_df["team_id"] == UCSB_TEAM_ID, "score_value"
+            (game_df["team_id"] == UCSB_TEAM_ID) & game_df["scoring_play"],
+            "score_value",
         ].sum()
 
         opp_team_id = (
@@ -83,7 +104,8 @@ def compute_ppp(df):
             else row0["home_team_id"]
         )
         opp_points = game_df.loc[
-            game_df["team_id"] == opp_team_id, "score_value"
+            (game_df["team_id"] == opp_team_id) & game_df["scoring_play"],
+            "score_value",
         ].sum()
 
         ucsb_poss = count_possessions(game_df, UCSB_TEAM_ID)
