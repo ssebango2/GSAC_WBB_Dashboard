@@ -11,11 +11,11 @@ library(wehoop)
 library(dplyr)
 library(readr)
 
-# ── Fetch ──────────────────────────────────────────────────────────────────────
+# ── Fetch ─────────────────────────────────────────────────────────────────────
 message("Fetching 2025-26 Women's College Basketball PBP data...")
 pbp <- wehoop::load_wbb_pbp(seasons = 2026)
 
-# ── Filter ─────────────────────────────────────────────────────────────────────
+# ── Filter ────────────────────────────────────────────────────────────────────
 ucsb_pbp <- pbp |>
   filter(
     home_team_name == "UC Santa Barbara" |
