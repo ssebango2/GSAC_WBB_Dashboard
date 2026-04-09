@@ -4,12 +4,18 @@ UCSB Women's Basketball 2025-26 analytics dashboard built with Streamlit.
 
 ## Setup
 
+**Python** (dashboard + data fetching):
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install setuptools==70.3.0
-pip install "xgboost<3.1"
-pip install streamlit plotly pandas sportsdataverse
+pip install -r requirements/python.txt
+```
+
+**R** (data fetching via wehoop):
+
+```bash
+Rscript requirements/r.R
 ```
 
 ## Refresh Data
