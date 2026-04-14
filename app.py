@@ -678,9 +678,9 @@ st.divider()
 # 5 · PLAYER OVERPERFORMANCE/UNDERPERFORMANCE
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("Player Spotlight: Recent Form")
+st.header("Player Performance")
 
-st.caption("Select a player to see their scoring trend over the last 3 games vs. their season average.")
+st.caption("Select a player to see their scoring trend over the last 10 games vs. their season average.")
 
 def load_player_trends(box_path, games_df):
     try:
@@ -700,7 +700,9 @@ def load_player_trends(box_path, games_df):
 player_trends_df = load_player_trends("data/ucsb_wbb_2026_box.csv", full_df)
 
 if not player_trends_df.empty:
-    all_players = sorted(player_trends_df['athlete_display_name'].unique())
+    player_sorting = player_trends_df[['athlete_display_name', 'avg_points']].drop_duplicates()
+    player_sorting = player_sorting.sort_values('avg_points', ascending=False)
+    all_players = player_sorting['athlete_display_name'].tolist()
     selected_player = st.selectbox('Select a Player', all_players)
     
     p_data = player_trends_df[player_trends_df['athlete_display_name'] == selected_player]
