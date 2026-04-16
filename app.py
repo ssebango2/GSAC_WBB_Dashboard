@@ -39,6 +39,11 @@ OPP_COLOR = "#8B9BB0"
 PPP_WIN_THRESHOLD = 1.00
 
 
+
+# Offensive efficiency threshold for insight generation.
+PPP_WIN_THRESHOLD = 1.00
+
+
 # ── Data loading ───────────────────────────────────────────────────────────────
 
 @st.cache_data
@@ -53,6 +58,48 @@ def load_data() -> pd.DataFrame:
     df["scoring_play"]     = df["scoring_play"].astype(str).str.upper() == "TRUE"
     df["shooting_play"]    = df["shooting_play"].astype(str).str.upper() == "TRUE"
     return df
+
+def load_player_performance():
+    try:
+        df = pd.read_csv("data/ucsb_wbb_2026_box.csv")
+        name_col = 'athlete_display_name'
+
+        avgs = df.groupby(name_col)['points'].mean().reset_index()
+        avgs.rename(columns = {'points': 'avg_pts'}, inplace=True)
+
+        merged = pd.merge(df, avgs, on=name_col)
+        merged['points_diff'] = merged['points'] - merged['avg_pts']
+
+        return merged
+    
+    except FileNotFoundError:
+        return pd.DataFrame
+
+def compute_players_game_stats(df: pd.DataFrame) -> pd.DataFrame:
+    ucsb_plays = df[df['team_id'] == UCSB_TEAM_ID].copy()
+
+    points = ucsb_plays[ucsb_plays['scoring_play']].groupby(['game_id', 'athlete_id_1', 'athlete_id_1_name'])['score_value'].sum().reset_index()
+    points.columns = ['game_id', 'player_id', 'player_name', 'pts']
+
+    rebs = ucsb_plays[ucsb_plays['type_text'].str.contains("Rebound", na=False)].groupby(['game_id', 'athlete_id_1'])['type_text'].count().reset_index()
+    rebs.columns = ['game_id', 'player_id', 'reb']
+
+    player_stats = pd.merge(points, rebs, on=['game_id', 'player_id'], how='outer').fillna(0)
+
+    return player_stats
+
+def get_performance_indicator(player_df: pd.DataFrame):
+    season_avgs = player_df.groupby('player_name')[['pts','reb']].mean().reset_index()
+    season_avgs.columns = ['player_name', 'avg_points', 'avg_rebounds']
+
+    merged = pd.merge(player_df, season_avgs, on='player_name')
+
+    merged['points_diff'] = merged['pts'] - merged['avg_points']
+    merged['rebounds_diff'] = merged['reb'] - merged['avg_rebounds']
+
+    return merged
+
+# ── Possession counting ────────────────────────────────────────────────────────
 
 
 # ── Possession counting ────────────────────────────────────────────────────────
@@ -133,6 +180,22 @@ def compute_four_factors(team_plays: pd.DataFrame) -> dict:
     tov      = int(team_plays["type_text"].isin(TURNOVER_TYPES).sum())
     oreb     = int((team_plays["type_text"] == OFF_REBOUND_TYPE).sum())
     dreb     = int((team_plays["type_text"] == DEF_REBOUND_TYPE).sum())
+
+    # eFG% = (FGM + 0.5 × 3PM) / FGA  — rewards 3-pt makes at 1.5× weight
+    efg = (fgm + 0.5 * three_pm) / max(fga, 1)
+
+    # TO% = turnovers per possession estimate (Hollinger formula)
+    tov_pct = tov / max(fga + 0.44 * fta + tov, 1)
+
+    # FT Rate = FTA / FGA  (how often do they get to the line?)
+    ftr = fta / max(fga, 1)
+
+    return {
+        "fga": fga, "fgm": fgm, "three_pa": three_pa, "three_pm": three_pm,
+        "fta": fta, "ftm": ftm, "tov": tov, "oreb": oreb, "dreb": dreb,
+        "efg": efg, "tov_pct": tov_pct, "ftr": ftr,
+    }
+
 
     # eFG% = (FGM + 0.5 × 3PM) / FGA  — rewards 3-pt makes at 1.5× weight
     efg = (fgm + 0.5 * three_pm) / max(fga, 1)
@@ -635,6 +698,85 @@ st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 5 · PLAYER OVERPERFORMANCE/UNDERPERFORMANCE
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.header("Player Performance")
+
+st.caption("Select a player to see their scoring trend over the last 10 games vs. their season average.")
+
+def load_player_trends(box_path, games_df):
+    try:
+        box =pd.read_csv(box_path)
+
+        meta = games_df[['game_id', 'game_date', 'opponent', 'result']].copy()
+        df = pd.merge(box, meta, on='game_id')
+
+        avgs = df.groupby('athlete_display_name')['points'].mean().reset_index()
+
+        avgs.rename(columns={'points': 'avg_points'}, inplace=True)
+
+        return pd.merge(df, avgs, on='athlete_display_name')
+    except Exception:
+        return pd.DataFrame()
+    
+player_trends_df = load_player_trends("data/ucsb_wbb_2026_box.csv", full_df)
+
+if not player_trends_df.empty:
+    player_sorting = player_trends_df[['athlete_display_name', 'avg_points']].drop_duplicates()
+    player_sorting = player_sorting.sort_values('avg_points', ascending=False)
+    all_players = player_sorting['athlete_display_name'].tolist()
+    selected_player = st.selectbox('Select a Player', all_players)
+    
+    p_data = player_trends_df[player_trends_df['athlete_display_name'] == selected_player]
+    p_data = p_data.sort_values('game_date_x', ascending=False).head(10).iloc[::-1]
+
+    p_data['game_date_x'] = pd.to_datetime(p_data['game_date_x'])
+    p_data["game_label"] = p_data.apply(lambda r: f"{r['game_date_x'].strftime('%b %d')}\nvs {r['opponent']}", axis=1)
+
+
+
+    avg_points = p_data['avg_points'].iloc[0]
+
+    fig_spot = go.Figure()
+
+    fig_spot.add_trace(go.Bar(
+        x=p_data['game_label'],
+        y=p_data['points'],
+        marker_color=[UCSB_NAVY if p >= avg_points else UCSB_GOLD for p in p_data['points']],
+        text=p_data['points'],
+        textposition='outside',
+        name='Points Scored'
+        ))
+
+    fig_spot.add_hline(
+        y=avg_points, 
+        line_dash="dash", 
+        line_color="red",
+        annotation_text=f"Season Avg: {avg_points:.1f} pts", 
+        annotation_position="top left"
+    )
+
+    fig_spot.update_layout(
+        yaxis_title="Points",
+        xaxis_title="",
+        height=400,
+        margin=dict(t=50, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False
+    )
+
+    st.plotly_chart(fig_spot, use_container_width=True)
+
+else:
+    st.warning("Player boxscore data not found")
+
+st.divider()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6 · PER-GAME CHARTS
 # 5 · PER-GAME CHARTS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -758,6 +900,7 @@ st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 7 · GAME LOG
 # 6 · GAME LOG
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -811,4 +954,5 @@ else:
 | **TO%** | Turnover rate — `TOV / (FGA + 0.44 × FTA + TOV)` — lower is better |
 | **OREB%** | Offensive rebound rate — `UCSB OREB / (UCSB OREB + Opp DREB)` |
 | **FT Rate** | Free throw rate — `FTA / FGA` — how often UCSB gets to the line |
+        """)
         """)
