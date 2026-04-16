@@ -39,6 +39,11 @@ OPP_COLOR = "#8B9BB0"
 PPP_WIN_THRESHOLD = 1.00
 
 
+
+# Offensive efficiency threshold for insight generation.
+PPP_WIN_THRESHOLD = 1.00
+
+
 # ── Data loading ───────────────────────────────────────────────────────────────
 
 @st.cache_data
@@ -96,6 +101,8 @@ def get_performance_indicator(player_df: pd.DataFrame):
 
 # ── Possession counting ────────────────────────────────────────────────────────
 
+
+# ── Possession counting ────────────────────────────────────────────────────────
 
 def count_possessions(game_sorted: pd.DataFrame, team_id: int) -> int:
     """
@@ -173,6 +180,22 @@ def compute_four_factors(team_plays: pd.DataFrame) -> dict:
     tov      = int(team_plays["type_text"].isin(TURNOVER_TYPES).sum())
     oreb     = int((team_plays["type_text"] == OFF_REBOUND_TYPE).sum())
     dreb     = int((team_plays["type_text"] == DEF_REBOUND_TYPE).sum())
+
+    # eFG% = (FGM + 0.5 × 3PM) / FGA  — rewards 3-pt makes at 1.5× weight
+    efg = (fgm + 0.5 * three_pm) / max(fga, 1)
+
+    # TO% = turnovers per possession estimate (Hollinger formula)
+    tov_pct = tov / max(fga + 0.44 * fta + tov, 1)
+
+    # FT Rate = FTA / FGA  (how often do they get to the line?)
+    ftr = fta / max(fga, 1)
+
+    return {
+        "fga": fga, "fgm": fgm, "three_pa": three_pa, "three_pm": three_pm,
+        "fta": fta, "ftm": ftm, "tov": tov, "oreb": oreb, "dreb": dreb,
+        "efg": efg, "tov_pct": tov_pct, "ftr": ftr,
+    }
+
 
     # eFG% = (FGM + 0.5 × 3PM) / FGA  — rewards 3-pt makes at 1.5× weight
     efg = (fgm + 0.5 * three_pm) / max(fga, 1)
@@ -754,6 +777,7 @@ st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 6 · PER-GAME CHARTS
+# 5 · PER-GAME CHARTS
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.header("Per-Game Performance")
@@ -877,6 +901,7 @@ st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 7 · GAME LOG
+# 6 · GAME LOG
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.header("Game Log")
@@ -929,4 +954,5 @@ else:
 | **TO%** | Turnover rate — `TOV / (FGA + 0.44 × FTA + TOV)` — lower is better |
 | **OREB%** | Offensive rebound rate — `UCSB OREB / (UCSB OREB + Opp DREB)` |
 | **FT Rate** | Free throw rate — `FTA / FGA` — how often UCSB gets to the line |
+        """)
         """)
