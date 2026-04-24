@@ -698,56 +698,97 @@ def load_player_trends(box_path, games_df):
         return pd.DataFrame()
     
 player_trends_df = load_player_trends("data/ucsb_wbb_2026_box.csv", full_df)
-
 if not player_trends_df.empty:
-    player_sorting = player_trends_df[['athlete_display_name', 'avg_points']].drop_duplicates()
-    player_sorting = player_sorting.sort_values('avg_points', ascending=False)
-    all_players = player_sorting['athlete_display_name'].tolist()
-    selected_player = st.selectbox('Select a Player', all_players)
-    
-    p_data = player_trends_df[player_trends_df['athlete_display_name'] == selected_player]
-    p_data = p_data.sort_values('game_date_x', ascending=False).head(10).iloc[::-1]
 
-    p_data['game_date_x'] = pd.to_datetime(p_data['game_date_x'])
-    p_data["game_label"] = p_data.apply(lambda r: f"{r['game_date_x'].strftime('%b %d')}\nvs {r['opponent']}", axis=1)
+    col_sel, col_met = st.columns([1,1])
+
+    with col_sel:
+        player_sorting = player_trends_df[['athlete_display_name', 'avg_points']].drop_duplicates()
+        player_sorting = player_sorting.sort_values('avg_points', ascending=False)
+        all_players = player_sorting['athlete_display_name'].tolist()
+        selected_player = st.selectbox("Select a Player", all_players)
 
 
+    with col_met:
 
-    avg_points = p_data['avg_points'].iloc[0]
+        metric_map = {
+            'Points': 'points',
+            'Rebounds': 'rebounds',
+            'Assists': 'assists',
+            'Steals': 'steals',
+            'Blocks': 'blocks'
+        }
+        selected_label = st.radio('Metric', list(metric_map.keys()), horizontal=True)
+        active_metric =metric_map[selected_label]
+
+    p_full_data = player_trends_df[player_trends_df['athlete_display_name'] == selected_player].copy()
+    p_full_data['game_date_x'] = pd.to_datetime(p_full_data['game_date_x'])
+    p_full_data = p_full_data.sort_values('game_date_x', ascending=False)
+
+    p_last_10 = p_full_data.head(10).iloc[::-1]
+    season_avg = p_full_data[active_metric].mean()
+    last_10_avg = p_last_10[active_metric].mean()
+
+    img_col, stats_col = st.columns([1,4])
+
+    with img_col:
+        if 'athlete_headshot_href' in p_full_data.columns and pd.notnull(p_full_data['athlete_headshot_href'].iloc[0]):
+            st.image(p_full_data['athlete_headshot_href'].iloc[0], width=120)
+        else:
+            st.write("No Image")
+
+    with stats_col:
+        m1,m2,m3 = st.columns(3)
+        m1.metric("Season Average", f'{season_avg:.1f}')
+        m2.metric("Last 10 Average", f'{last_10_avg:.1f}',
+                  delta=f'{last_10_avg-season_avg:+.1f}',
+                  help="Comparing last 10 games with season average")
+        m3.metric("Max (Season)", f'{p_full_data[active_metric].max():.0f}')
+
+    p_last_10['game_label'] = p_last_10.apply(
+        lambda r: f"{r['game_date_x'].strftime('%b %d')}<br>vs {r['opponent']}", axis=1
+    )
 
     fig_spot = go.Figure()
 
     fig_spot.add_trace(go.Bar(
-        x=p_data['game_label'],
-        y=p_data['points'],
-        marker_color=[UCSB_NAVY if p >= avg_points else UCSB_GOLD for p in p_data['points']],
-        text=p_data['points'],
+        x=p_last_10['game_label'],
+        y=p_last_10[active_metric],
+        marker_color = [UCSB_NAVY if val >= season_avg else UCSB_GOLD for val in p_last_10[active_metric]],
+        text=p_last_10[active_metric],
         textposition='outside',
-        name='Points Scored'
-        ))
+        name=selected_label,
+        hovertemplate="<b>%{x}</b><br>" + f'{selected_label}: ' + "%{y}<extra></extra>",
+    ))
 
     fig_spot.add_hline(
-        y=avg_points, 
-        line_dash="dash", 
-        line_color="red",
-        annotation_text=f"Season Avg: {avg_points:.1f} pts", 
-        annotation_position="top left"
+        y=season_avg,
+        line_dash='dash',
+        line_color= "#FF4B4B",
+        annotation_text=f'Season Average: {season_avg:.1f}',
+        annotation_position='top left'
     )
 
     fig_spot.update_layout(
-        yaxis_title="Points",
+        title=f'Last 10 games: {selected_player} ({selected_label})',
+        yaxis_title=selected_label,
         xaxis_title="",
         height=400,
-        margin=dict(t=50, b=20),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(t=60, b=20),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
         showlegend=False
     )
 
     st.plotly_chart(fig_spot, use_container_width=True)
 
+    with st.expander(f"View {selected_player}'s Full Season Game Log"):
+        display_cols = ['game_date_x', 'opponent', 'minutes', 'points', 'rebounds', 'assists', 'steals', 'blocks']
+        st.dataframe(p_full_data[display_cols].rename(columns={'game_date_x': 'Date'}), use_container_width=True, hide_index=True)
+    
 else:
     st.warning("Player boxscore data not found")
+
 
 st.divider()
 
