@@ -1,0 +1,19 @@
+# Python dependencies for the UCSB WBB dashboard
+#
+# Setup:
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements/python.txt
+
+# Pinned to avoid a known incompatibility with sportsdataverse's build chain
+setuptools==70.3.0
+xgboost<3.1
+
+# Core dashboard
+streamlit
+plotly
+pandas
+numpy
+
+# Data fetching (PBP from SportsDataverse CDN)
+sportsdataverse
