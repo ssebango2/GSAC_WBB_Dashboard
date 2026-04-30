@@ -75,6 +75,22 @@ def load_player_performance():
     except FileNotFoundError:
         return pd.DataFrame
 
+@st.cache_data
+def load_player_lookup() -> pd.DataFrame:
+    try:
+        box = pd.read_csv("data/ucsb_wbb_2026_box.csv", low_memory=False)
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["athlete_id", "athlete_display_name"])
+
+    box["team_id"] = pd.to_numeric(box["team_id"], errors="coerce")
+    box["athlete_id"] = pd.to_numeric(box["athlete_id"], errors="coerce")
+    lookup = (
+        box[box["team_id"] == UCSB_TEAM_ID][["athlete_id", "athlete_display_name"]]
+        .dropna(subset=["athlete_id"])
+        .drop_duplicates(subset=["athlete_id"])
+    )
+    return lookup
+
 def compute_players_game_stats(df: pd.DataFrame) -> pd.DataFrame:
     ucsb_plays = df[df['team_id'] == UCSB_TEAM_ID].copy()
 
@@ -941,6 +957,261 @@ st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 7 · SHOT MAP
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.header("UCSB Shot Map")
+st.caption("Made shots = red circles · Missed shots = blue Xs")
+
+shot_game_options = filtered[["game_id", "game_date", "home_away", "opponent", "result"]].drop_duplicates()
+shot_game_options = shot_game_options.sort_values("game_date").reset_index(drop=True)
+shot_game_options["game_label"] = shot_game_options.apply(
+    lambda r: (
+        f"{r['game_date'].strftime('%Y-%m-%d')} "
+        f"{'vs' if r['home_away'] == 'Home' else '@'} {r['opponent']} ({r['result']})"
+    ),
+    axis=1,
+)
+
+shot_label_to_id = dict(zip(shot_game_options["game_label"], shot_game_options["game_id"]))
+selected_shot_game = st.selectbox(
+    "Shot chart game",
+    options=["All filtered games"] + shot_game_options["game_label"].tolist(),
+    index=0,
+)
+
+if selected_shot_game == "All filtered games":
+    shot_games = set(filtered["game_id"].tolist()) if n_filtered > 0 else set()
+else:
+    shot_games = {shot_label_to_id[selected_shot_game]}
+
+shot_df = raw_df[
+    (raw_df["team_id"] == UCSB_TEAM_ID)
+    & (raw_df["game_id"].isin(shot_games))
+    & (raw_df["type_text"].isin(MADE_FG_TYPES))
+].copy()
+
+if shot_df.empty:
+    st.info("No UCSB shot attempts available for the selected filters.")
+else:
+    shot_df["athlete_id_1"] = pd.to_numeric(shot_df["athlete_id_1"], errors="coerce")
+    player_lookup = load_player_lookup()
+    shot_df = shot_df.merge(
+        player_lookup,
+        left_on="athlete_id_1",
+        right_on="athlete_id",
+        how="left",
+    )
+    shot_df["shooter_label"] = shot_df["athlete_display_name"].fillna(
+        shot_df["athlete_id_1"].apply(
+            lambda x: f"Player ID {int(x)}" if pd.notna(x) else "Unknown"
+        )
+    )
+
+    player_options = sorted(shot_df["shooter_label"].dropna().unique().tolist())
+    selected_shooter = st.selectbox(
+        "Shot chart player",
+        options=["All players"] + player_options,
+        index=0,
+    )
+    if selected_shooter != "All players":
+        shot_df = shot_df[shot_df["shooter_label"] == selected_shooter]
+
+    shot_df["coordinate_x"] = pd.to_numeric(shot_df["coordinate_x"], errors="coerce")
+    shot_df["coordinate_y"] = pd.to_numeric(shot_df["coordinate_y"], errors="coerce")
+
+    # Drop missing and sentinel/out-of-bounds values from provider feed.
+    shot_df = shot_df[
+        shot_df["coordinate_x"].notna()
+        & shot_df["coordinate_y"].notna()
+        & shot_df["coordinate_x"].between(-50, 50)
+        & shot_df["coordinate_y"].between(-30, 30)
+    ]
+
+    if shot_df.empty:
+        st.info("No valid shot coordinates available for the selected filters.")
+    else:
+        # Normalize both basket directions to a single hoop view.
+        # Original feed places hoops on left/right (x near +/- 41.75).
+        # After transform: hoop is at (0, 0), all shots shown on one half court.
+        hoop_x = 41.75
+        shot_df["plot_x"] = shot_df["coordinate_y"]
+        shot_df["plot_y"] = hoop_x - shot_df["coordinate_x"].abs()
+        shot_df["shot_distance_ft"] = np.sqrt(shot_df["plot_x"] ** 2 + shot_df["plot_y"] ** 2)
+        shot_df["shot_result"] = np.where(shot_df["scoring_play"], "Made", "Missed")
+        shot_df["shot_type"] = np.where(
+            pd.to_numeric(shot_df["score_value"], errors="coerce") == 3,
+            "3PT attempt",
+            "2PT attempt",
+        )
+
+        shot_meta = (
+            filtered[["game_id", "game_date", "opponent", "home_away"]]
+            .drop_duplicates()
+            .rename(columns={"game_date": "game_date_meta"})
+        )
+        shot_df = shot_df.merge(shot_meta, on="game_id", how="left")
+        shot_df["game_context"] = shot_df.apply(
+            lambda r: (
+                f"{pd.Timestamp(r['game_date_meta']).strftime('%Y-%m-%d')} "
+                f"{'vs' if r['home_away'] == 'Home' else '@'} {r['opponent']}"
+            )
+            if pd.notna(r["game_date_meta"]) and pd.notna(r["opponent"]) and pd.notna(r["home_away"])
+            else "Game context unavailable",
+            axis=1,
+        )
+
+        made_shots = shot_df[shot_df["scoring_play"]]
+        missed_shots = shot_df[~shot_df["scoring_play"]]
+
+        court_color = "rgba(25, 70, 145, 0.9)"
+        # NCAA women's 3PT line (2021-22 onward): 22' 1.75" top, 21' 8" corners.
+        three_radius = 22 + (1.75 / 12)  # 22.145833...
+        corner_three_x = 21 + (8 / 12)    # 21.666667...
+        baseline_y = -4.0
+        paint_top_y = baseline_y + 19.0  # top of key is 19 ft from baseline
+        # Arc/line intersection so corner segments connect seamlessly to the arc.
+        break_y = np.sqrt(max(three_radius**2 - corner_three_x**2, 0.0))
+        angle_at_break = np.arcsin(np.clip(break_y / three_radius, -1.0, 1.0))
+        theta = np.linspace(angle_at_break, np.pi - angle_at_break, 180)
+        three_arc_x = three_radius * np.cos(theta)
+        three_arc_y = three_radius * np.sin(theta)
+        ft_theta = np.linspace(0, np.pi, 120)
+        ft_arc_x = 6 * np.cos(ft_theta)
+        ft_arc_y = paint_top_y - 6 * np.sin(ft_theta)
+
+        is_three = pd.to_numeric(shot_df["score_value"], errors="coerce") == 3
+        is_paint = (
+            shot_df["plot_x"].abs().le(6)
+            & shot_df["plot_y"].ge(baseline_y)
+            & shot_df["plot_y"].le(paint_top_y)
+        )
+        is_mid_range = (~is_three) & (~is_paint) & (shot_df["shot_distance_ft"] < three_radius)
+
+        def fg_stat(mask: pd.Series) -> tuple[str, str]:
+            attempts = int(mask.sum())
+            if attempts == 0:
+                return "N/A", "0/0"
+            makes = int((shot_df.loc[mask, "scoring_play"]).sum())
+            return f"{(makes / attempts):.1%}", f"{makes}/{attempts}"
+
+        total_pct, total_raw = fg_stat(pd.Series(True, index=shot_df.index))
+        paint_pct, paint_raw = fg_stat(is_paint)
+        mid_pct, mid_raw = fg_stat(is_mid_range)
+        three_pct, three_raw = fg_stat(is_three)
+
+        fig_shot = go.Figure()
+        # Half-court markings with hoop at top center.
+        fig_shot.add_shape(type="rect", x0=-25, y0=-4, x1=25, y1=47, line=dict(color=court_color, width=2))
+        # Paint drawn to match zone logic: |x| <= 6 and baseline_y <= y <= paint_top_y.
+        fig_shot.add_shape(type="rect", x0=-6, y0=baseline_y, x1=6, y1=paint_top_y, line=dict(color=court_color, width=2))
+        fig_shot.add_shape(type="circle", x0=-0.75, y0=-0.75, x1=0.75, y1=0.75, line=dict(color=court_color, width=3))
+        fig_shot.add_shape(type="line", x0=-3, y0=-1.5, x1=3, y1=-1.5, line=dict(color=court_color, width=2))
+        fig_shot.add_shape(
+            type="line",
+            x0=-corner_three_x,
+            y0=-4,
+            x1=-corner_three_x,
+            y1=break_y,
+            line=dict(color=court_color, width=2),
+        )
+        fig_shot.add_shape(
+            type="line",
+            x0=corner_three_x,
+            y0=-4,
+            x1=corner_three_x,
+            y1=break_y,
+            line=dict(color=court_color, width=2),
+        )
+        fig_shot.add_trace(go.Scatter(
+            x=ft_arc_x,
+            y=ft_arc_y,
+            mode="lines",
+            line=dict(color=court_color, width=2),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+        fig_shot.add_trace(go.Scatter(
+            x=three_arc_x,
+            y=three_arc_y,
+            mode="lines",
+            name="3PT Arc",
+            line=dict(color=court_color, width=2),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        fig_shot.add_trace(go.Scatter(
+            x=made_shots["plot_x"],
+            y=made_shots["plot_y"],
+            mode="markers",
+            name="Made",
+            marker=dict(color="red", symbol="circle", size=8, opacity=0.8),
+            customdata=np.stack(
+                [
+                    made_shots["shooter_label"].to_numpy(),
+                    made_shots["shot_distance_ft"].round(1).to_numpy(),
+                    made_shots["shot_type"].to_numpy(),
+                    made_shots["shot_result"].to_numpy(),
+                    made_shots["game_context"].to_numpy(),
+                ],
+                axis=-1,
+            ),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "%{customdata[2]} %{customdata[3]}<br>"
+                "Distance: %{customdata[1]} ft<br>"
+                "%{customdata[4]}<extra></extra>"
+            ),
+        ))
+        fig_shot.add_trace(go.Scatter(
+            x=missed_shots["plot_x"],
+            y=missed_shots["plot_y"],
+            mode="markers",
+            name="Missed",
+            marker=dict(color="blue", symbol="x", size=8, opacity=0.8),
+            customdata=np.stack(
+                [
+                    missed_shots["shooter_label"].to_numpy(),
+                    missed_shots["shot_distance_ft"].round(1).to_numpy(),
+                    missed_shots["shot_type"].to_numpy(),
+                    missed_shots["shot_result"].to_numpy(),
+                    missed_shots["game_context"].to_numpy(),
+                ],
+                axis=-1,
+            ),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "%{customdata[2]} %{customdata[3]}<br>"
+                "Distance: %{customdata[1]} ft<br>"
+                "%{customdata[4]}<extra></extra>"
+            ),
+        ))
+
+        fig_shot.update_layout(
+            xaxis_title="",
+            yaxis_title="",
+            height=520,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(range=[-25, 25], showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(range=[47, -5], showgrid=False, zeroline=False, showticklabels=False, scaleanchor="x", scaleratio=1),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(t=30, b=30),
+        )
+        plot_col, metric_col = st.columns([4, 1])
+        with plot_col:
+            st.plotly_chart(fig_shot, use_container_width=True)
+        with metric_col:
+            st.metric("Total FG%", total_pct, delta=total_raw, delta_color="off")
+            st.metric("Paint FG%", paint_pct, delta=paint_raw, delta_color="off")
+            st.metric("Mid-Range FG%", mid_pct, delta=mid_raw, delta_color="off")
+            st.metric("3P FG%", three_pct, delta=three_raw, delta_color="off")
+
+st.divider()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 7 · GAME LOG
 # 6 · GAME LOG
 # ══════════════════════════════════════════════════════════════════════════════
@@ -995,5 +1266,4 @@ else:
 | **TO%** | Turnover rate — `TOV / (FGA + 0.44 × FTA + TOV)` — lower is better |
 | **OREB%** | Offensive rebound rate — `UCSB OREB / (UCSB OREB + Opp DREB)` |
 | **FT Rate** | Free throw rate — `FTA / FGA` — how often UCSB gets to the line |
-        """)
         """)
